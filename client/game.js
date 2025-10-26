@@ -1,5 +1,4 @@
 // Phaser game configuration
-// Phaser uses Component pattern: game objects have behaviors
 const config = {
   type: Phaser.AUTO,
   width: 800,
@@ -15,7 +14,6 @@ const config = {
 const game = new Phaser.Game(config);
 
 // Socket.io client connection
-// WebSocket: full-duplex TCP connection for real-time bidirectional data
 const socket = io();
 
 // Data structures for client-side game state
@@ -23,15 +21,33 @@ let players = {};  // HashMap: { playerId: spriteObject }
 let myPlayerId = null;
 
 function preload() {
-  // Load assets (sprites, etc.)
-  // For now, using Phaser built-in shapes
+  // Load isometric metaverse background
+  // Asset: Your generated isometric town image
+  this.load.image('background', 'assets/background.png');
 }
 
 function create() {
-  // Initialize game scene
+  // ========== RENDERING LAYER 1: Background ==========
+  // Add background image centered at canvas center
+  // Phaser coordinate system: (0,0) is top-left
+  // Canvas center: (width/2, height/2) = (400, 300)
+  const bg = this.add.image(400, 300, 'background');
+  
+  // Scale background to fill canvas if needed
+  // Calculate scale ratio to maintain aspect ratio
+  const scaleX = this.cameras.main.width / bg.width;
+  const scaleY = this.cameras.main.height / bg.height;
+  const scale = Math.max(scaleX, scaleY); // Use max to cover entire canvas
+  bg.setScale(scale);
+  
+  // Set depth to 0 - renders behind everything
+  // Phaser depth system: lower values render first (back to front)
+  bg.setDepth(0);
+  
+  // ========== RENDERING LAYER 2: Players ==========
+  // All player sprites will have depth > 0 to appear on top of background
   
   // Socket event: receive initial game state
-  // This is a one-time snapshot on connection
   socket.on('init', (data) => {
     myPlayerId = data.playerId;
     
@@ -42,10 +58,19 @@ function create() {
       }
     });
     
-    // Create controllable player (self)
-    players[myPlayerId] = this.add.circle(data.players.find(p => p.id === myPlayerId).x, 
-                                           data.players.find(p => p.id === myPlayerId).y, 
-                                           20, 0x00ff00);
+    // Create controllable player (self) - GREEN circle
+    const myPlayer = this.add.circle(
+      data.players.find(p => p.id === myPlayerId).x,
+      data.players.find(p => p.id === myPlayerId).y,
+      20, 
+      0x00ff00
+    );
+    
+    // Depth sorting: player sprites appear above background
+    // y-based depth for isometric illusion: objects lower on screen appear in front
+    myPlayer.setDepth(myPlayer.y);
+    
+    players[myPlayerId] = myPlayer;
   });
   
   // Socket event: another player joined
@@ -54,12 +79,16 @@ function create() {
   });
   
   // Socket event: delta update for player movement
-  // This is O(1) because we directly access players HashMap
   socket.on('playerMoved', (data) => {
     if (players[data.id]) {
       // Update sprite position (rendering layer)
       players[data.id].x = data.x;
       players[data.id].y = data.y;
+      
+      // Update depth based on y position for isometric sorting
+      // Rule: objects with higher y-value are "closer" to camera
+      // This creates pseudo-3D effect where lower screen objects appear in front
+      players[data.id].setDepth(data.y);
     }
   });
   
@@ -84,7 +113,6 @@ function create() {
     if (e.key === 'Enter') {
       const message = e.target.value;
       if (message.trim()) {
-        // Send chat to server
         socket.emit('chatMessage', { message });
         e.target.value = '';
       }
@@ -94,15 +122,13 @@ function create() {
 
 function update() {
   // Game loop: runs at ~60 FPS (Phaser default)
-  // This is the "render loop" - update then draw
   
   if (!myPlayerId || !players[myPlayerId]) return;
   
   const player = players[myPlayerId];
   let moved = false;
   
-  // Input polling: check keyboard state each frame
-  // This is O(1) constant time check
+  // Input polling: check keyboard state each frame - O(1)
   if (this.cursors.left.isDown) {
     player.x -= 3;
     moved = true;
@@ -120,9 +146,10 @@ function update() {
     moved = true;
   }
   
-  // Send delta update only when moved (optimization)
-  // Avoids flooding server with redundant data
+  // Update depth in real-time for proper layering
+  // This ensures player sprite renders correctly relative to isometric background
   if (moved) {
+    player.setDepth(player.y);
     socket.emit('move', { x: player.x, y: player.y });
   }
 }
@@ -130,7 +157,13 @@ function update() {
 // Helper: add other player to scene
 // O(1) HashMap insertion + Phaser sprite creation
 function addPlayer(player) {
-  players[player.id] = game.scene.scenes[0].add.circle(player.x, player.y, 20, 0xff0000);
+  const sprite = game.scene.scenes[0].add.circle(player.x, player.y, 20, 0xff0000);
+  
+  // Depth sorting: y-based depth for isometric perspective
+  // Algorithm: sprite.depth = sprite.y (higher y = closer to camera = rendered on top)
+  sprite.setDepth(player.y);
+  
+  players[player.id] = sprite;
 }
 
 // Helper: display chat message
