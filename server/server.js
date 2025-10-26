@@ -1,113 +1,123 @@
-// Main server: Express HTTP + Socket.io WebSocket layer
-// Architecture: Event-driven (Node.js event loop handles async I/O)
 const express = require('express');
 const http = require('http');
-const socketIO = require('socket.io');
+const socketIo = require('socket.io');
 const path = require('path');
 
-const gameState = require('./gameState');
-const proximityManager = require('./proximityManager');
-const config = require('./config');
-
-// Express app setup
 const app = express();
 const server = http.createServer(app);
-const io = socketIO(server);
+const io = socketIo(server);
 
-// Serve static files (HTML, JS, assets)
+// Serve static files from client directory
 app.use(express.static(path.join(__dirname, '../client')));
 
-// WebSocket connection handler
-// Event: 'connection' fires when client connects
-// Socket represents bi-directional communication channel
+// Store player data: { id, x, y, socket }
+const players = {};
+
+// PROXIMITY SETTINGS - Adjust this to control chat distance
+const CHAT_PROXIMITY_DISTANCE = 250;  // Pixels
+
+// Calculate Euclidean distance between two points
+function getDistance(x1, y1, x2, y2) {
+  return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+}
+
+// Get all players within proximity distance
+function getPlayersInRange(senderId, distance) {
+  const sender = players[senderId];
+  if (!sender) return [];
+  
+  return Object.keys(players)
+    .filter(id => {
+      if (id === senderId) return false;
+      const player = players[id];
+      return getDistance(sender.x, sender.y, player.x, player.y) <= distance;
+    });
+}
+
 io.on('connection', (socket) => {
-  console.log(`Player connected: ${socket.id}`);
+  console.log(`✅ Player connected: ${socket.id}`);
   
-  // Add player to game state (HashMap insertion)
-  const player = gameState.addPlayer(socket.id);
+  // FIXED: Spawn at BOTTOM CENTER (walkable area near fountain)
+  players[socket.id] = {
+    id: socket.id,
+    x: 960,   // Horizontal center
+    y: 900,   // Bottom area (on walkable ground, not on buildings)
+    socket: socket
+  };
   
-  // Send current game state to new player only
-  // This is a unicast message (one recipient)
+  // Send initialization data to new player
+  const playerList = Object.keys(players).map(id => ({
+    id,
+    x: players[id].x,
+    y: players[id].y
+  }));
+  
   socket.emit('init', {
     playerId: socket.id,
-    players: gameState.getAllPlayers()
+    players: playerList
   });
   
-  // Broadcast new player to all OTHER clients
-  // socket.broadcast = everyone except sender
-  // This is a multicast message (many recipients, excluding sender)
-  socket.broadcast.emit('playerJoined', player);
-
-  // Handle player movement
-  // Event-driven: fires when client sends 'move' event
-  socket.on('move', (data) => {
-    // Update HashMap with new position
-    gameState.updatePlayer(socket.id, data.x, data.y);
-    
-    // Delta broadcast: only send changed data
-    // Optimization: don't send full game state, just the delta
-    io.emit('playerMoved', {
-      id: socket.id,
-      x: data.x,
-      y: data.y
-    });
+  console.log(`📤 Sent init to ${socket.id}:`, { playerId: socket.id, players: playerList });
+  
+  // Notify other players
+  socket.broadcast.emit('playerJoined', {
+    id: socket.id,
+    x: players[socket.id].x,
+    y: players[socket.id].y
   });
-
-  // Handle proximity chat
-  // Algorithm: Filter recipients by distance, then unicast to each
+  
+  // Handle player movement
+  socket.on('move', (data) => {
+    if (players[socket.id]) {
+      players[socket.id].x = data.x;
+      players[socket.id].y = data.y;
+      
+      // Broadcast to all players
+      io.emit('playerMoved', {
+        id: socket.id,
+        x: data.x,
+        y: data.y
+      });
+    }
+  });
+  
+  // Handle PROXIMITY-BASED chat messages
   socket.on('chatMessage', (data) => {
-    const sender = gameState.getPlayer(socket.id);
-    
+    const sender = players[socket.id];
     if (!sender) return;
     
-    // Get players within Euclidean distance threshold
-    // Time complexity: O(n) where n = total players
-    const nearbySocketIds = proximityManager.getNearbySocketIds(
-      socket.id,
-      { x: sender.x, y: sender.y },
-      gameState
-    );
+    // Get players within proximity
+    const nearbyPlayerIds = getPlayersInRange(socket.id, CHAT_PROXIMITY_DISTANCE);
     
-    // Unicast to each nearby player
-    // Why not broadcast? Because we need selective recipients
-    // This is targeted multicast
-    nearbySocketIds.forEach(recipientId => {
-      io.to(recipientId).emit('chatMessage', {
-        senderId: socket.id,
-        message: data.message,
-        timestamp: Date.now()
-      });
-    });
-    
-    // Echo back to sender for confirmation
-    socket.emit('chatMessage', {
+    const chatData = {
       senderId: socket.id,
       message: data.message,
-      timestamp: Date.now()
+      x: sender.x,
+      y: sender.y
+    };
+    
+    // Send to sender (self)
+    socket.emit('chatMessage', chatData);
+    
+    // Send only to nearby players
+    nearbyPlayerIds.forEach(playerId => {
+      if (players[playerId] && players[playerId].socket) {
+        players[playerId].socket.emit('chatMessage', chatData);
+      }
     });
+    
+    console.log(`💬 Proximity chat from ${socket.id.substring(0, 6)}: "${data.message}" to ${nearbyPlayerIds.length} nearby players`);
   });
-
+  
   // Handle disconnect
-  // Event: 'disconnect' fires when client loses connection
   socket.on('disconnect', () => {
-    console.log(`Player disconnected: ${socket.id}`);
-    
-    // Remove from HashMap
-    gameState.removePlayer(socket.id);
-    
-    // Broadcast removal to all clients
+    console.log(`❌ Player disconnected: ${socket.id}`);
+    delete players[socket.id];
     io.emit('playerLeft', socket.id);
   });
 });
 
-// Server tick loop (optional - for server-side simulation)
-// This is like a game loop but on server
-// setInterval creates periodic callback (event-driven timing)
-setInterval(() => {
-  // Future: Add NPC movement, collision detection, etc.
-  // Current: Delta updates already sent on player actions
-}, 1000 / config.SERVER_TICK_RATE);
-
-server.listen(config.PORT, () => {
-  console.log(`Server running on http://localhost:${config.PORT}`);
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });

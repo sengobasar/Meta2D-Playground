@@ -1,9 +1,14 @@
 // Phaser game configuration
 const config = {
   type: Phaser.AUTO,
-  width: 800,
-  height: 600,
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+    width: 1920,
+    height: 1080
+  },
   parent: 'game-container',
+  backgroundColor: '#2d2d2d',
   scene: {
     preload: preload,
     create: create,
@@ -12,165 +17,328 @@ const config = {
 };
 
 const game = new Phaser.Game(config);
-
-// Socket.io client connection
 const socket = io();
 
-// Data structures for client-side game state
-let players = {};  // HashMap: { playerId: spriteObject }
+let players = {};
 let myPlayerId = null;
+let cursors = null;
+let gameScene = null;
+let pendingInit = null;
+let chatFocused = false;  // NEW: Track chat input focus
+
+const DIRECTION = {
+  UP: 0,
+  RIGHT: 1,
+  DOWN: 2,
+  LEFT: 3
+};
+
+socket.on('connect', () => console.log('🔌 Socket connected:', socket.id));
+
+socket.on('init', (data) => {
+  console.log('📥 Init received:', data);
+  myPlayerId = data.playerId;
+  if (!gameScene) {
+    pendingInit = data;
+    return;
+  }
+  initializePlayers(data);
+});
+
+function initializePlayers(data) {
+  data.players.forEach(player => {
+    if (player.id !== myPlayerId) {
+      addPlayer(gameScene, player);
+    }
+  });
+  
+  const myPlayerData = data.players.find(p => p.id === myPlayerId);
+  if (myPlayerData) {
+    players[myPlayerId] = createPlayerSprite(gameScene, myPlayerData.x, myPlayerData.y, true);
+    console.log('✅ Player created');
+  }
+  pendingInit = null;
+}
+
+socket.on('playerJoined', (player) => {
+  if (gameScene) addPlayer(gameScene, player);
+});
+
+socket.on('playerMoved', (data) => {
+  if (players[data.id] && players[data.id].sprite) {
+    const playerObj = players[data.id];
+    playerObj.sprite.x = data.x;
+    playerObj.sprite.y = data.y;
+    
+    if (playerObj.shadow) {
+      playerObj.shadow.x = data.x;
+      playerObj.shadow.y = data.y - 30;
+    }
+    
+    playerObj.sprite.setDepth(data.y + 1);
+    if (playerObj.shadow) playerObj.shadow.setDepth(data.y - 1);
+  }
+});
+
+socket.on('playerLeft', (playerId) => {
+  if (players[playerId]) {
+    if (players[playerId].sprite) players[playerId].sprite.destroy();
+    if (players[playerId].shadow) players[playerId].shadow.destroy();
+    delete players[playerId];
+  }
+});
+
+socket.on('chatMessage', (data) => {
+  displayChatMessage(`Player ${data.senderId.substring(0, 4)}: ${data.message}`);
+});
 
 function preload() {
-  // Load isometric metaverse background
-  // Asset: Your generated isometric town image
+  console.log('🔄 Preload started...');
+  
   this.load.image('background', 'assets/background.png');
+  
+  this.load.spritesheet('player_walk_down', 'assets/player2.png', {
+    frameWidth: 32,
+    frameHeight: 64
+  });
+  
+  this.load.spritesheet('player_walk_up', 'assets/player0.png', {
+    frameWidth: 32,
+    frameHeight: 64
+  });
+  
+  this.load.spritesheet('player_walk_right', 'assets/player1.png', {
+    frameWidth: 32,
+    frameHeight: 64
+  });
+  
+  this.load.spritesheet('player_walk_left', 'assets/player3.png', {
+    frameWidth: 32,
+    frameHeight: 64
+  });
+  
+  this.load.spritesheet('player_stand', 'assets/stand.png', {
+    frameWidth: 32,
+    frameHeight: 64
+  });
+  
+  this.load.on('complete', () => console.log('✅ All assets loaded'));
 }
 
 function create() {
-  // ========== RENDERING LAYER 1: Background ==========
-  // Add background image centered at canvas center
-  // Phaser coordinate system: (0,0) is top-left
-  // Canvas center: (width/2, height/2) = (400, 300)
-  const bg = this.add.image(400, 300, 'background');
+  console.log('🎮 Create started...');
+  gameScene = this;
   
-  // Scale background to fill canvas if needed
-  // Calculate scale ratio to maintain aspect ratio
+  const bg = this.add.image(this.cameras.main.centerX, this.cameras.main.centerY, 'background');
   const scaleX = this.cameras.main.width / bg.width;
   const scaleY = this.cameras.main.height / bg.height;
-  const scale = Math.max(scaleX, scaleY); // Use max to cover entire canvas
-  bg.setScale(scale);
-  
-  // Set depth to 0 - renders behind everything
-  // Phaser depth system: lower values render first (back to front)
+  bg.setScale(Math.max(scaleX, scaleY));
   bg.setDepth(0);
   
-  // ========== RENDERING LAYER 2: Players ==========
-  // All player sprites will have depth > 0 to appear on top of background
-  
-  // Socket event: receive initial game state
-  socket.on('init', (data) => {
-    myPlayerId = data.playerId;
-    
-    // Populate initial players - O(n) loop
-    data.players.forEach(player => {
-      if (player.id !== myPlayerId) {
-        addPlayer(player);
-      }
-    });
-    
-    // Create controllable player (self) - GREEN circle
-    const myPlayer = this.add.circle(
-      data.players.find(p => p.id === myPlayerId).x,
-      data.players.find(p => p.id === myPlayerId).y,
-      20, 
-      0x00ff00
-    );
-    
-    // Depth sorting: player sprites appear above background
-    // y-based depth for isometric illusion: objects lower on screen appear in front
-    myPlayer.setDepth(myPlayer.y);
-    
-    players[myPlayerId] = myPlayer;
+  this.anims.create({
+    key: 'walk_down',
+    frames: this.anims.generateFrameNumbers('player_walk_down', { start: 0, end: 3 }),
+    frameRate: 10,
+    repeat: -1
   });
   
-  // Socket event: another player joined
-  socket.on('playerJoined', (player) => {
-    addPlayer(player);
+  this.anims.create({
+    key: 'walk_up',
+    frames: this.anims.generateFrameNumbers('player_walk_up', { start: 0, end: 3 }),
+    frameRate: 10,
+    repeat: -1
   });
   
-  // Socket event: delta update for player movement
-  socket.on('playerMoved', (data) => {
-    if (players[data.id]) {
-      // Update sprite position (rendering layer)
-      players[data.id].x = data.x;
-      players[data.id].y = data.y;
-      
-      // Update depth based on y position for isometric sorting
-      // Rule: objects with higher y-value are "closer" to camera
-      // This creates pseudo-3D effect where lower screen objects appear in front
-      players[data.id].setDepth(data.y);
+  this.anims.create({
+    key: 'walk_right',
+    frames: this.anims.generateFrameNumbers('player_walk_right', { start: 1, end: 3 }).concat(
+      this.anims.generateFrameNumbers('player_walk_right', { start: 0, end: 0 })
+    ),
+    frameRate: 12,
+    repeat: -1
+  });
+  
+  this.anims.create({
+    key: 'walk_left',
+    frames: this.anims.generateFrameNumbers('player_walk_left', { start: 1, end: 3 }).concat(
+      this.anims.generateFrameNumbers('player_walk_left', { start: 0, end: 0 })
+    ),
+    frameRate: 12,
+    repeat: -1
+  });
+  
+  this.anims.create({
+    key: 'idle_down',
+    frames: [{ key: 'player_stand', frame: 2 }],
+    frameRate: 1
+  });
+  
+  this.anims.create({
+    key: 'idle_up',
+    frames: [{ key: 'player_stand', frame: 0 }],
+    frameRate: 1
+  });
+  
+  this.anims.create({
+    key: 'idle_right',
+    frames: [{ key: 'player_stand', frame: 1 }],
+    frameRate: 1
+  });
+  
+  this.anims.create({
+    key: 'idle_left',
+    frames: [{ key: 'player_stand', frame: 3 }],
+    frameRate: 1
+  });
+  
+  cursors = this.input.keyboard.createCursorKeys();
+  
+  // FIXED CHAT INPUT - Allow spaces and prevent game interference
+  const chatInput = document.getElementById('chat-input');
+  
+  // Track when chat is focused
+  chatInput.addEventListener('focus', () => {
+    chatFocused = true;
+    console.log('💬 Chat focused - game paused');
+  });
+  
+  chatInput.addEventListener('blur', () => {
+    chatFocused = false;
+    console.log('🎮 Game resumed');
+  });
+  
+  // Handle all keyboard events when chat is focused
+  chatInput.addEventListener('keydown', (e) => {
+    // Stop event propagation to prevent Phaser from capturing keys
+    if (chatFocused) {
+      e.stopPropagation();
+    }
+    
+    // Send message on Enter
+    if (e.key === 'Enter' && e.target.value.trim()) {
+      socket.emit('chatMessage', { message: e.target.value });
+      e.target.value = '';
+      chatInput.blur(); // Return focus to game
+    }
+    
+    // Allow Escape to exit chat
+    if (e.key === 'Escape') {
+      chatInput.blur();
     }
   });
   
-  // Socket event: player left
-  socket.on('playerLeft', (playerId) => {
-    if (players[playerId]) {
-      players[playerId].destroy(); // Remove from Phaser scene
-      delete players[playerId];    // Remove from HashMap
-    }
+  // Also stop keyup and keypress propagation
+  chatInput.addEventListener('keyup', (e) => {
+    if (chatFocused) e.stopPropagation();
   });
   
-  // Socket event: receive proximity chat message
-  socket.on('chatMessage', (data) => {
-    displayChatMessage(`Player ${data.senderId.substring(0, 4)}: ${data.message}`);
+  chatInput.addEventListener('keypress', (e) => {
+    if (chatFocused) e.stopPropagation();
   });
   
-  // Input handling: keyboard
-  this.cursors = this.input.keyboard.createCursorKeys();
-  
-  // Input handling: chat
-  document.getElementById('chat-input').addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-      const message = e.target.value;
-      if (message.trim()) {
-        socket.emit('chatMessage', { message });
-        e.target.value = '';
-      }
-    }
-  });
+  console.log('✅ Create completed with chat input fix');
+  if (pendingInit) initializePlayers(pendingInit);
 }
 
 function update() {
-  // Game loop: runs at ~60 FPS (Phaser default)
-  
   if (!myPlayerId || !players[myPlayerId]) return;
   
-  const player = players[myPlayerId];
+  // Don't move player when typing in chat!
+  if (chatFocused) return;
+  
+  const playerObj = players[myPlayerId];
+  const sprite = playerObj.sprite;
+  const shadow = playerObj.shadow;
+  
   let moved = false;
+  let velocityX = 0;
+  let velocityY = 0;
+  let direction = playerObj.lastDirection || DIRECTION.DOWN;
   
-  // Input polling: check keyboard state each frame - O(1)
-  if (this.cursors.left.isDown) {
-    player.x -= 3;
+  if (cursors.up.isDown) {
+    velocityY = -5;
+    direction = DIRECTION.UP;
     moved = true;
-  }
-  if (this.cursors.right.isDown) {
-    player.x += 3;
-    moved = true;
-  }
-  if (this.cursors.up.isDown) {
-    player.y -= 3;
-    moved = true;
-  }
-  if (this.cursors.down.isDown) {
-    player.y += 3;
+  } else if (cursors.down.isDown) {
+    velocityY = 5;
+    direction = DIRECTION.DOWN;
     moved = true;
   }
   
-  // Update depth in real-time for proper layering
-  // This ensures player sprite renders correctly relative to isometric background
+  if (cursors.left.isDown) {
+    velocityX = -5;
+    direction = DIRECTION.LEFT;
+    moved = true;
+  } else if (cursors.right.isDown) {
+    velocityX = 5;
+    direction = DIRECTION.RIGHT;
+    moved = true;
+  }
+  
   if (moved) {
-    player.setDepth(player.y);
-    socket.emit('move', { x: player.x, y: player.y });
+    sprite.x += velocityX;
+    sprite.y += velocityY;
+    
+    if (shadow) {
+      shadow.x = sprite.x;
+      shadow.y = sprite.y - 30;
+    }
+    
+    sprite.play(getWalkAnimationKey(direction), true);
+    playerObj.lastDirection = direction;
+    sprite.setDepth(sprite.y + 1);
+    if (shadow) shadow.setDepth(sprite.y - 1);
+    socket.emit('move', { x: sprite.x, y: sprite.y });
+  } else {
+    sprite.play(getIdleAnimationKey(playerObj.lastDirection || DIRECTION.DOWN), true);
   }
 }
 
-// Helper: add other player to scene
-// O(1) HashMap insertion + Phaser sprite creation
-function addPlayer(player) {
-  const sprite = game.scene.scenes[0].add.circle(player.x, player.y, 20, 0xff0000);
-  
-  // Depth sorting: y-based depth for isometric perspective
-  // Algorithm: sprite.depth = sprite.y (higher y = closer to camera = rendered on top)
-  sprite.setDepth(player.y);
-  
-  players[player.id] = sprite;
+function getWalkAnimationKey(direction) {
+  return ['walk_up', 'walk_right', 'walk_down', 'walk_left'][direction];
 }
 
-// Helper: display chat message
+function getIdleAnimationKey(direction) {
+  return ['idle_up', 'idle_right', 'idle_down', 'idle_left'][direction];
+}
+
+function createPlayerSprite(scene, x, y, isMyPlayer = false) {
+  // Bigger shadow with subtle breathing animation
+  const shadow = scene.add.ellipse(x, y - 30, 50, 15, 0x000000, 0.4);
+  shadow.setDepth(y - 1);
+  
+  // Pulsing shadow animation for life-like effect
+  scene.tweens.add({
+    targets: shadow,
+    scaleX: 1.08,
+    scaleY: 1.08,
+    alpha: 0.3,
+    duration: 800,
+    yoyo: true,
+    repeat: -1,
+    ease: 'Sine.easeInOut'
+  });
+  
+  const sprite = scene.add.sprite(x, y, 'player_walk_down', 0);
+  sprite.setOrigin(0.5, 1.0);
+  sprite.setScale(2.5);
+  sprite.setTint(isMyPlayer ? 0x00ff00 : 0xff0000);
+  sprite.setDepth(y + 1);
+  sprite.play('idle_down');
+  
+  console.log('✅ Animated shadow created');
+  return { sprite, shadow, lastDirection: DIRECTION.DOWN };
+}
+
+function addPlayer(scene, player) {
+  players[player.id] = createPlayerSprite(scene, player.x, player.y, false);
+}
+
 function displayChatMessage(text) {
   const chatDiv = document.getElementById('chat-messages');
   const msgElement = document.createElement('div');
   msgElement.textContent = text;
   chatDiv.appendChild(msgElement);
-  chatDiv.scrollTop = chatDiv.scrollHeight; // Auto-scroll to bottom
+  chatDiv.scrollTop = chatDiv.scrollHeight;
+  if (chatDiv.children.length > 50) chatDiv.removeChild(chatDiv.children[0]);
 }
