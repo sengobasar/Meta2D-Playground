@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Metaverse Chat</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+</head>
+<body>
+  <div id="game-container"></div>
+  <div id="chat-ui" style="position:absolute; bottom:10px; left:10px; background:rgba(0,0,0,0.7); padding:10px;">
+    <input id="chat-input" type="text" placeholder="Type message..." style="width:200px;">
+    <div id="chat-messages" style="height:150px; overflow-y:scroll; color:white;"></div>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
